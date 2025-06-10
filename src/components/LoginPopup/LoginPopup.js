@@ -14,6 +14,7 @@ const LoginPopup = ({ setShowLogin }) => {
   });
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const { loginUser } = useContext(StoreContext);
 
   const { fetchCart } = useContext(StoreContext); // Get fetchCart from StoreContext
 
@@ -57,15 +58,23 @@ const LoginPopup = ({ setShowLogin }) => {
       if (response.ok) {
         if (currState === "Sign Up") {
           setSuccess("Account created successfully! You can now log in.");
-          setCurrState("Login"); // Switch to login after sign-up
+          setCurrState("Login");
         } else {
           setSuccess("Login successful!");
-          localStorage.setItem("accessToken", data.access); // Store JWT access token
-          localStorage.setItem("refreshToken", data.refresh); // Store JWT refresh token
-
-          // Fetch cart data after successful login
-          await fetchCart();
-
+          localStorage.setItem("accessToken", data.access);
+          localStorage.setItem("refreshToken", data.refresh);
+      
+          loginUser(data.access, {
+            username: formData.username,
+            email: formData.email
+          });
+      
+          try {
+            await fetchCart(); // if it fails, don't overwrite the success message
+          } catch (cartError) {
+            console.error("Cart fetch failed after login:", cartError);
+          }
+      
           setTimeout(() => setShowLogin(false), 2000);
         }
       } else {
@@ -73,6 +82,7 @@ const LoginPopup = ({ setShowLogin }) => {
           data.username?.[0] || data.email?.[0] || data.password?.[0] || data.detail || "Something went wrong."
         );
       }
+      
     } catch (err) {
       setError("Something went wrong. Please try again.");
     }

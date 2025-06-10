@@ -14,8 +14,10 @@ const Navbar = ({ setShowLogin }) => {
   const handleLogout = () => {
     localStorage.removeItem("accessToken");
     localStorage.removeItem("refreshToken");
+    localStorage.removeItem("cartItems");
     window.location.reload(); // Refresh to reflect logout state
   };
+  
 
   return (
     <div className="navbar">

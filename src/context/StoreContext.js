@@ -1,147 +1,250 @@
-import { createContext, useEffect, useState } from "react";
-import axios from "axios"; // Import axios
-import { food_list } from "../assets/assets";
+import { createContext, useState, useCallback, useEffect } from "react";
+import axios from "axios";
 import { API_BASE_URL } from "../config/api";
 
 export const StoreContext = createContext(null);
 
-const StoreContextProvider = (props) => {
-  const [cartItems, setCartItems] = useState({}); // Initialize as an empty object
-  const [subtotal, setSubtotal] = useState(0); // Define subtotal state
-  const [deliveryFee, setDeliveryFee] = useState(0); // Define deliveryFee state
-  const [total, setTotal] = useState(0); // Define total state
+const StoreContextProvider = ({ children }) => {
+  const [cartItems, setCartItems] = useState({});
+  const [isCartLoaded, setIsCartLoaded] = useState(false);
+  const [user, setUser] = useState(() => {
+    const token = localStorage.getItem("accessToken");
+    return token ? { accessToken: token } : null;
+  });
 
-  // Fetch cart data from the backend when the component mounts or the user logs in
-  const fetchCart = async () => {
-    try {
-      const accessToken = localStorage.getItem("accessToken");
-      if (!accessToken) {
-        console.error("No access token found. User is not logged in.");
-        return;
-      }
+  const [popup, setPopup] = useState({ show: false, message: "" });
+  const [menuItems, setMenuItems] = useState([]);
 
-      const response = await axios.get(`${API_BASE_URL}/app/cart/get-cart`, {
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-        },
-      });
-
-      const data = response.data;
-      console.log("Cart loaded from backend:", data);
-
-      // Transform cart_items array into an object
-      const cartItemsObject = data.cart_items.reduce((acc, item) => {
-        acc[item.menu_item_id] = item.quantity; // Use menu_item_id as the key
-        return acc;
-      }, {});
-
-      console.log("Cart Items Object:", cartItemsObject); // Debugging log
-      setCartItems(cartItemsObject); // Set cartItems as an object
-      setSubtotal(data.cart_subtotal);
-      setDeliveryFee(data.cart_delivery_fee);
-      setTotal(data.cart_total);
-    } catch (error) {
-      console.error("Error fetching cart:", error);
-      alert(error.response?.data?.error || "Failed to load cart. Please try again.");
-    }
-  };
-
-  // Fetch cart data on page load if the user is logged in
-  useEffect(() => {
-    const accessToken = localStorage.getItem("accessToken");
-    if (accessToken) {
-      fetchCart(); // Fetch cart data if the user is already logged in
-    }
+  const triggerPopup = useCallback((message) => {
+    setPopup({ show: true, message });
+    setTimeout(() => setPopup({ show: false, message: "" }), 3000);
   }, []);
 
-  // Function to update the cart
-  const updateCart = async (itemId, quantityChange) => {
-    let currentQuantity; // Declare currentQuantity outside the try block
+  const logout = useCallback(() => {
+    localStorage.removeItem("accessToken");
+    localStorage.removeItem("refreshToken");
+    localStorage.removeItem("cartItems");
+    setUser(null);
+    setCartItems({});
+    window.location.href = "/";
+  }, []);
 
+  const fetchCart = useCallback(async () => {
     try {
       const token = localStorage.getItem("accessToken");
-      if (!token) {
-        console.error("No access token found. User is not logged in.");
-        return;
-      }
+      if (!token) return;
 
-      // Get the current quantity from cartItems (default to 0 if not found)
-      currentQuantity = cartItems[itemId] || 0;
-      const newQuantity = currentQuantity + quantityChange;
+      const response = await axios.get(`${API_BASE_URL}/app/cart/get-cart`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
 
-      // Update the UI immediately
-      setCartItems((prev) => ({
-        ...prev,
-        [itemId]: newQuantity,
-      }));
-
-      // Send the update to the backend
-      const response = await axios.post(
-        `${API_BASE_URL}/app/cart/update`,
-        { menu_item_id: itemId, quantity: newQuantity },
-        {
-          headers: {
-            Authorization: `Bearer ${token}`,
-            "Content-Type": "application/json",
-          },
-        }
-      );
-
-      if (!response.data.success) {
-        console.error("Failed to update cart:", response.data.error);
-        // Revert UI using currentQuantity
-        setCartItems((prev) => ({
-          ...prev,
-          [itemId]: currentQuantity,
-        }));
+      if (response.data.success) {
+        const apiCart = response.data.cart_items.reduce((acc, item) => {
+          acc[item.menu_item_id] = item.quantity;
+          return acc;
+        }, {});
+        
+        setCartItems(apiCart);
+        localStorage.setItem("cartItems", JSON.stringify(apiCart));
       }
     } catch (error) {
-      console.error("Error updating cart:", error);
-      // Revert UI if API call fails
-      setCartItems((prev) => ({
-        ...prev,
-        [itemId]: currentQuantity, // Now currentQuantity is defined here
-      }));
-    }
-  };
-
-  // Function to calculate the total cart amount
-  const getTotalCartAmount = () => {
-    let totalAmount = 0;
-    for (const itemId in cartItems) {
-      if (cartItems[itemId] > 0) {
-        const itemInfo = food_list.find(
-          (product) => Number(product._id) === Number(itemId)
-        );
-        if (itemInfo) {
-          totalAmount += itemInfo.price * cartItems[itemId];
-        }
+      console.error("Error fetching cart:", error);
+      if (error.response?.status === 401) {
+        logout();
       }
     }
-    return totalAmount;
-  };
+  }, [logout]);
 
-  // Functions to add or remove items from the cart
-  const addToCart = (itemId) => updateCart(itemId, 1); // Add (+)
-  const removeFromCart = (itemId) => updateCart(itemId, -1); // Remove (-)
+  const updateCart = useCallback(async (itemId, quantityChange) => {
+    const token = localStorage.getItem("accessToken");
+    
+    if (!token && quantityChange > 0) {
+      triggerPopup("Please login to add items");
+      return;
+    }
 
-  // Context value to be provided to consumers
+    // Calculate new quantity first
+    const currentQuantity = cartItems[itemId] || 0;
+    const newQuantity = Math.max(0, currentQuantity + quantityChange);
+
+    // Optimistic UI update - update local state immediately
+    setCartItems(prev => {
+      const newCart = { ...prev };
+      if (newQuantity === 0) {
+        delete newCart[itemId];
+      } else {
+        newCart[itemId] = newQuantity;
+      }
+      localStorage.setItem("cartItems", JSON.stringify(newCart));
+      return newCart;
+    });
+
+    if (token) {
+      try {
+        // First fetch the current cart to ensure we have latest data
+        const currentCart = await axios.get(`${API_BASE_URL}/app/cart/get-cart`, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+
+        // Find if the item already exists in the cart
+        const existingItem = currentCart.data.cart_items?.find(
+          item => item.menu_item_id === itemId
+        );
+
+        // Calculate the proper new quantity based on server state
+        const serverQuantity = existingItem?.quantity || 0;
+        const finalQuantity = Math.max(0, serverQuantity + quantityChange);
+
+        // Update the cart with the correct quantity
+        await axios.post(`${API_BASE_URL}/app/cart/update`, {
+          menu_item_id: itemId,
+          quantity: finalQuantity
+        }, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+
+        // Refresh the cart to ensure sync with server
+        await fetchCart();
+      } catch (error) {
+        console.error("Error updating cart on server:", error);
+        // Revert to saved cart if API fails
+        const savedCart = localStorage.getItem("cartItems");
+        if (savedCart) {
+          setCartItems(JSON.parse(savedCart));
+        }
+        triggerPopup("Failed to update cart on server");
+      }
+    }
+  }, [cartItems, triggerPopup, fetchCart]);
+
+  const addToCart = useCallback((itemId) => updateCart(itemId, 1), [updateCart]);
+  const removeFromCart = useCallback((itemId) => updateCart(itemId, -1), [updateCart]);
+
+  const removeItemCompletely = useCallback(async (itemId) => {
+    try {
+      const token = localStorage.getItem("accessToken");
+      if (token) {
+        await axios.delete(`${API_BASE_URL}/app/cart/remove/${itemId}/`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        
+        // Update local state and storage
+        setCartItems(prev => {
+          const newCart = { ...prev };
+          delete newCart[itemId];
+          localStorage.setItem("cartItems", JSON.stringify(newCart));
+          return newCart;
+        });
+      }
+    } catch (error) {
+      console.error("Error removing item completely:", error);
+      triggerPopup("Failed to remove item");
+    }
+  }, [triggerPopup]);
+
+  const loginUser = useCallback(async (token, userData) => {
+    localStorage.setItem("accessToken", token);
+    setUser({ accessToken: token, ...userData });
+    
+    const savedCart = localStorage.getItem("cartItems");
+    if (savedCart) {
+      const parsedCart = JSON.parse(savedCart);
+      setCartItems(parsedCart);
+      
+      try {
+        await fetchCart();
+      } catch (error) {
+        console.error("Failed to sync cart with server:", error);
+      }
+    } else {
+      try {
+        await fetchCart();
+      } catch (error) {
+        console.error("Failed to fetch cart:", error);
+      }
+    }
+  }, [fetchCart]);
+
+  const getTotalCartAmount = useCallback(() => {
+    return Object.entries(cartItems).reduce((total, [id, quantity]) => {
+      const item = menuItems.find(item => item.id === parseInt(id));
+      return total + (item ? item.price * quantity : 0);
+    }, 0);
+  }, [cartItems, menuItems]);
+
+  useEffect(() => {
+    const initializeCart = async () => {
+      const token = localStorage.getItem("accessToken");
+      const savedCart = localStorage.getItem("cartItems");
+      
+      if (token) {
+        try {
+          await fetchCart();
+        } catch (error) {
+          console.error("Failed to fetch cart from API:", error);
+          if (savedCart) {
+            try {
+              setCartItems(JSON.parse(savedCart));
+            } catch (parseError) {
+              console.error("Failed to parse saved cart:", parseError);
+              setCartItems({});
+            }
+          }
+        }
+      } else if (savedCart) {
+        try {
+          setCartItems(JSON.parse(savedCart));
+        } catch (parseError) {
+          console.error("Failed to parse saved cart:", parseError);
+          setCartItems({});
+        }
+      }
+      
+      setIsCartLoaded(true);
+    };
+
+    initializeCart();
+  }, [fetchCart]);
+
+  useEffect(() => {
+    const fetchMenuItems = async () => {
+      try {
+        const response = await axios.get(`${API_BASE_URL}/app/menu-items`);
+        setMenuItems(response.data);
+      } catch (error) {
+        console.error("Error fetching menu items:", error);
+      }
+    };
+    fetchMenuItems();
+  }, []);
+
   const contextValue = {
-    food_list,
     cartItems,
-    setCartItems,
     addToCart,
     removeFromCart,
     getTotalCartAmount,
-    subtotal,
-    deliveryFee,
-    total,
-    fetchCart, // Add fetchCart to the context
+    user,
+    loginUser,
+    logout,
+    triggerPopup,
+    popupMessage: popup.message,
+    showPopup: popup.show,
+    closePopup: () => setPopup({ show: false, message: "" }),
+    isCartLoaded,
+    menuItems,
+    removeItemCompletely
   };
 
   return (
     <StoreContext.Provider value={contextValue}>
-      {props.children}
+      {children}
+      {popup.show && (
+        <div className="popup-overlay">
+          <div className="popup">
+            <p>{popup.message}</p>
+          </div>
+        </div>
+      )}
     </StoreContext.Provider>
   );
 };
